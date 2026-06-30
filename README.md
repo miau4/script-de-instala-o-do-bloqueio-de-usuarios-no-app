@@ -16,6 +16,19 @@ O script instalará e configurará automaticamente todos os componentes necessá
 
 ---
 
+
+Se for deletar apenas o script:
+
+```bash
+bashrm -f /var/www/html/device_check.php
+```
+
+Se for remover a instalação completa do script de bloqueio:
+
+```bash
+bashrm -rf /var/www/html/netsimon_devices.db /var/www/html/netsimon_device_log.txt /var/www/h
+```
+
 ## 📋 O que é instalado
 
 - **Nginx** — Servidor web na porta 81
