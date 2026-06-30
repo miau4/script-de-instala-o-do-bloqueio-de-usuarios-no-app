@@ -1,0 +1,1 @@
+# script-de-instala-o-do-bloqueio-de-usuarios-no-app
