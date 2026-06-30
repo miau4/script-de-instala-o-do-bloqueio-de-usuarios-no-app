@@ -1,0 +1,441 @@
+#!/bin/bash
+
+# =============================================================================
+# NetSimon Device Check — Script de Instalação Completo
+# Instalação automática de todos os componentes do sistema de bloqueio
+# =============================================================================
+
+set -e
+
+# Cores para output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Funções de log
+log_info() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+log_success() {
+    echo -e "${GREEN}[✓]${NC} $1"
+}
+
+log_error() {
+    echo -e "${RED}[✗]${NC} $1"
+}
+
+log_warn() {
+    echo -e "${YELLOW}[!]${NC} $1"
+}
+
+# =============================================================================
+# VALIDAÇÕES INICIAIS
+# =============================================================================
+
+log_info "Iniciando instalação do NetSimon Device Check..."
+
+if [[ $EUID -ne 0 ]]; then
+    log_error "Este script deve ser executado como root (use sudo)"
+    exit 1
+fi
+
+log_success "Executando como root"
+
+# Detectar distribuição
+if ! command -v apt &> /dev/null; then
+    log_error "Sistema não é baseado em Debian/Ubuntu. Apenas apt é suportado."
+    exit 1
+fi
+
+log_success "Distribuição detectada: Debian/Ubuntu"
+
+# =============================================================================
+# ATUALIZAR PACOTES
+# =============================================================================
+
+log_info "Atualizando lista de pacotes..."
+apt update -qq
+log_success "Pacotes atualizados"
+
+# =============================================================================
+# INSTALAR DEPENDÊNCIAS
+# =============================================================================
+
+log_info "Instalando dependências..."
+
+PACKAGES=(
+    "nginx"
+    "php8.1-cli"
+    "php8.1-fpm"
+    "php8.1-sqlite3"
+    "php8.1-curl"
+    "sqlite3"
+    "curl"
+)
+
+for package in "${PACKAGES[@]}"; do
+    if dpkg -l | grep -q "^ii  $package"; then
+        log_success "$package já instalado"
+    else
+        log_info "Instalando $package..."
+        apt install -y "$package" > /dev/null 2>&1
+        log_success "$package instalado"
+    fi
+done
+
+# =============================================================================
+# VERIFICAR SERVIÇOS
+# =============================================================================
+
+log_info "Verificando serviços..."
+
+# Verificar PHP-FPM
+if systemctl is-active --quiet php8.1-fpm; then
+    log_success "PHP-FPM já está rodando"
+else
+    log_info "Iniciando PHP-FPM..."
+    systemctl start php8.1-fpm
+    systemctl enable php8.1-fpm
+    log_success "PHP-FPM iniciado"
+fi
+
+# Verificar Nginx
+if systemctl is-active --quiet nginx; then
+    log_success "Nginx já está rodando"
+else
+    log_info "Iniciando Nginx..."
+    systemctl start nginx
+    systemctl enable nginx
+    log_success "Nginx iniciado"
+fi
+
+# =============================================================================
+# CONFIGURAR NGINX
+# =============================================================================
+
+log_info "Configurando Nginx para processar PHP..."
+
+NGINX_CONFIG="/etc/nginx/sites-enabled/netsimon_web"
+
+cat > "$NGINX_CONFIG" << 'EOF'
+server {
+    listen 81;
+    server_name _;
+
+    location / {
+        root /var/www/html;
+        index index.html;
+    }
+
+    location ~ \.php$ {
+        root /var/www/html;
+        fastcgi_pass unix:/run/php/php8.1-fpm.sock;
+        fastcgi_index index.php;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        include fastcgi_params;
+    }
+}
+EOF
+
+log_success "Configuração Nginx salva em $NGINX_CONFIG"
+
+# Testar configuração
+if nginx -t > /dev/null 2>&1; then
+    log_success "Configuração Nginx validada"
+    systemctl reload nginx
+    log_success "Nginx recarregado"
+else
+    log_error "Erro na configuração Nginx"
+    exit 1
+fi
+
+# =============================================================================
+# CRIAR DIRETÓRIO DO APP
+# =============================================================================
+
+log_info "Criando diretórios..."
+
+mkdir -p /var/www/html
+chmod 755 /var/www/html
+chown www-data:www-data /var/www/html
+
+log_success "Diretórios criados e permissões definidas"
+
+# =============================================================================
+# INSTALAR SCRIPT PHP
+# =============================================================================
+
+log_info "Instalando script de verificação de dispositivos..."
+
+cat > /var/www/html/device_check.php << 'PHPEOF'
+<?php
+// =============================================================
+// NetSimon - Device Check
+// Arquivo: /var/www/html/device_check.php
+// =============================================================
+
+header('Content-Type: application/json');
+header('Access-Control-Allow-Origin: *');
+
+// ─── Configurações ───────────────────────────────────────────
+define('PAINEL_URL',  'https://painel.netsimon.fun/core/apiatlas.php');
+define('PAINEL_KEYS', [
+    'master'     => '4patpfjBYqnj9ZwhRa0BRQbevm',
+    'teste'      => 'YyCU4ujP08b025GlcOdWaDbhXJ',
+    'Alex'       => 'jmQSw9RfuUuQ45Ts1GO2syrCBG',
+    'Alexander'  => 'xzy5B2lD91AWV2LdDqWRl9VGXt',
+    'Anderson'   => 'KOwquUwx16uXYHPmhVNhTSJFV7',
+    'Ataildo'    => 'CJqKFGUNkEYzrgoNxO5agtYAwf',
+    'Jose'       => 'B3p412TbhvR0bCqJA7b3Tt2tyW',
+]);
+define('DB_PATH',     '/var/www/html/netsimon_devices.db');
+define('LOG_PATH',    '/var/www/html/netsimon_device_log.txt');
+
+// ─── Entrada ─────────────────────────────────────────────────
+$username    = trim($_POST['username']    ?? '');
+$device_hash = trim($_POST['device_hash'] ?? '');
+$phone       = trim($_POST['phone']       ?? '');
+$ip          = $_SERVER['REMOTE_ADDR']   ?? '';
+
+if (empty($username) || empty($device_hash)) {
+    echo json_encode(['status' => 'error', 'message' => 'Parâmetros inválidos']);
+    exit;
+}
+
+// ─── Banco SQLite ─────────────────────────────────────────────
+try {
+    $db = new PDO('sqlite:' . DB_PATH);
+    $db->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    $db->exec("CREATE TABLE IF NOT EXISTS devices (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        username    TEXT NOT NULL,
+        device_hash TEXT NOT NULL,
+        phone       TEXT,
+        ip          TEXT,
+        first_seen  TEXT NOT NULL,
+        last_seen   TEXT NOT NULL,
+        UNIQUE(username, device_hash)
+    )");
+    $db->exec("CREATE TABLE IF NOT EXISTS device_log (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        username    TEXT NOT NULL,
+        device_hash TEXT NOT NULL,
+        phone       TEXT,
+        ip          TEXT,
+        action      TEXT NOT NULL,
+        reason      TEXT,
+        created_at  TEXT NOT NULL
+    )");
+} catch (Exception $e) {
+    echo json_encode(['status' => 'error', 'message' => 'Erro no banco: ' . $e->getMessage()]);
+    exit;
+}
+
+$now = date('Y-m-d H:i:s');
+
+// ─── Busca usuário no painel ──────────────────────────────────
+function fetchUserFromPainel(string $username): ?array {
+    foreach (PAINEL_KEYS as $name => $key) {
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL            => PAINEL_URL,
+            CURLOPT_POST           => true,
+            CURLOPT_POSTFIELDS     => http_build_query(['passapi' => $key, 'module' => 'userget']),
+            CURLOPT_RETURNTRANSFER => true,
+            CURLOPT_TIMEOUT        => 10,
+            CURLOPT_HTTPHEADER     => ['Content-Type: application/x-www-form-urlencoded'],
+        ]);
+        $response = curl_exec($ch);
+        curl_close($ch);
+
+        if (!$response) continue;
+        $arr = json_decode($response, true);
+        if (!is_array($arr)) continue;
+
+        $lower = strtolower(trim($username));
+        foreach ($arr as $user) {
+            if (strtolower(trim($user['login'] ?? '')) === $lower) {
+                return $user;
+            }
+        }
+    }
+    return null;
+}
+
+$user = fetchUserFromPainel($username);
+if (!$user) {
+    echo json_encode(['status' => 'error', 'message' => 'Usuário não encontrado no painel']);
+    exit;
+}
+
+$limite = (int)($user['limite'] ?? 1);
+
+// ─── Verifica dispositivos registrados ───────────────────────
+$stmt = $db->prepare("SELECT device_hash FROM devices WHERE username = ?");
+$stmt->execute([$username]);
+$registered = $stmt->fetchAll(PDO::FETCH_COLUMN);
+
+$isRegistered = in_array($device_hash, $registered);
+$count        = count($registered);
+
+// ─── Lógica de bloqueio ───────────────────────────────────────
+if (!$isRegistered && $count >= $limite) {
+    // Dispositivo novo, limite atingido → BLOQUEAR
+    $db->prepare("INSERT INTO device_log (username, device_hash, phone, ip, action, reason, created_at)
+                  VALUES (?, ?, ?, ?, 'BLOCKED', ?, ?)")
+       ->execute([$username, $device_hash, $phone, $ip,
+                  "Limite de {$limite} dispositivo(s) atingido. Registrados: {$count}", $now]);
+
+    writeLog("BLOCKED | user={$username} | hash={$device_hash} | phone={$phone} | ip={$ip} | limite={$limite} | registrados={$count}");
+
+    echo json_encode([
+        'status'  => 'blocked',
+        'message' => 'Acesso bloqueado: limite de dispositivos atingido.',
+        'limit'   => $limite,
+        'devices' => $count,
+    ]);
+    exit;
+}
+
+// ─── Registra dispositivo novo (dentro do limite) ─────────────
+if (!$isRegistered) {
+    $db->prepare("INSERT OR IGNORE INTO devices (username, device_hash, phone, ip, first_seen, last_seen)
+                  VALUES (?, ?, ?, ?, ?, ?)")
+       ->execute([$username, $device_hash, $phone, $ip, $now, $now]);
+
+    $db->prepare("INSERT INTO device_log (username, device_hash, phone, ip, action, reason, created_at)
+                  VALUES (?, ?, ?, ?, 'NEW_DEVICE', ?, ?)")
+       ->execute([$username, $device_hash, $phone, $ip, "Novo dispositivo registrado", $now]);
+
+    writeLog("NEW_DEVICE | user={$username} | hash={$device_hash} | phone={$phone} | ip={$ip}");
+} else {
+    // Dispositivo já registrado → atualiza last_seen
+    $db->prepare("UPDATE devices SET last_seen = ?, ip = ? WHERE username = ? AND device_hash = ?")
+       ->execute([$now, $ip, $username, $device_hash]);
+}
+
+echo json_encode([
+    'status'  => 'allowed',
+    'message' => 'Dispositivo autorizado.',
+    'limit'   => $limite,
+    'devices' => $isRegistered ? $count : $count + 1,
+]);
+
+// ─── Log em arquivo ───────────────────────────────────────────
+function writeLog(string $line): void {
+    $entry = date('Y-m-d H:i:s') . ' | ' . $line . PHP_EOL;
+    file_put_contents(LOG_PATH, $entry, FILE_APPEND | LOCK_EX);
+}
+PHPEOF
+
+chown www-data:www-data /var/www/html/device_check.php
+chmod 644 /var/www/html/device_check.php
+
+log_success "Script PHP instalado"
+
+# =============================================================================
+# CRIAR BANCO SQLITE E PERMISSÕES
+# =============================================================================
+
+log_info "Inicializando banco de dados SQLite..."
+
+sqlite3 /var/www/html/netsimon_devices.db << 'SQLEOF'
+CREATE TABLE IF NOT EXISTS devices (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    username    TEXT NOT NULL,
+    device_hash TEXT NOT NULL,
+    phone       TEXT,
+    ip          TEXT,
+    first_seen  TEXT NOT NULL,
+    last_seen   TEXT NOT NULL,
+    UNIQUE(username, device_hash)
+);
+
+CREATE TABLE IF NOT EXISTS device_log (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    username    TEXT NOT NULL,
+    device_hash TEXT NOT NULL,
+    phone       TEXT,
+    ip          TEXT,
+    action      TEXT NOT NULL,
+    reason      TEXT,
+    created_at  TEXT NOT NULL
+);
+SQLEOF
+
+chown www-data:www-data /var/www/html/netsimon_devices.db
+chmod 644 /var/www/html/netsimon_devices.db
+
+log_success "Banco de dados criado"
+
+# =============================================================================
+# CRIAR ARQUIVO DE LOG
+# =============================================================================
+
+log_info "Criando arquivo de log..."
+
+touch /var/www/html/netsimon_device_log.txt
+chown www-data:www-data /var/www/html/netsimon_device_log.txt
+chmod 644 /var/www/html/netsimon_device_log.txt
+
+log_success "Arquivo de log criado"
+
+# =============================================================================
+# TESTE DO SISTEMA
+# =============================================================================
+
+log_info "Testando sistema..."
+
+TEST_RESPONSE=$(curl -s -X POST http://localhost:81/device_check.php \
+  --data-urlencode 'username=teste_install' \
+  --data-urlencode 'device_hash=test_hash_123' \
+  --data-urlencode 'phone=')
+
+if echo "$TEST_RESPONSE" | grep -q '"status"'; then
+    log_success "Teste de endpoint bem-sucedido"
+    echo "  Resposta: $TEST_RESPONSE"
+else
+    log_warn "Teste retornou resposta inesperada"
+    echo "  Resposta: $TEST_RESPONSE"
+fi
+
+# =============================================================================
+# RESUMO FINAL
+# =============================================================================
+
+echo ""
+log_success "═══════════════════════════════════════════════════════════"
+log_success "Instalação concluída com sucesso!"
+log_success "═══════════════════════════════════════════════════════════"
+echo ""
+echo -e "${GREEN}Componentes instalados:${NC}"
+echo "  ✓ Nginx (porta 81)"
+echo "  ✓ PHP 8.1 + PHP-FPM"
+echo "  ✓ SQLite3"
+echo "  ✓ Script de verificação de dispositivos"
+echo "  ✓ Banco de dados SQLite"
+echo "  ✓ Arquivo de log"
+echo ""
+echo -e "${GREEN}Localização dos arquivos:${NC}"
+echo "  Config Nginx:    $NGINX_CONFIG"
+echo "  Script PHP:      /var/www/html/device_check.php"
+echo "  Banco dados:     /var/www/html/netsimon_devices.db"
+echo "  Log:             /var/www/html/netsimon_device_log.txt"
+echo ""
+echo -e "${GREEN}Endpoint disponível em:${NC}"
+echo "  http://2.netsimon.fun:81/device_check.php"
+echo ""
+echo -e "${YELLOW}Próximos passos:${NC}"
+echo "  1. Atualizar o index.html do app com as funções de device check"
+echo "  2. Adicionar os métodos no WebUiActivity.kt (Kotlin)"
+echo "  3. Compilar novo APK e testar"
+echo ""
+echo -e "${YELLOW}Para resetar dispositivos de um usuário:${NC}"
+echo "  sqlite3 /var/www/html/netsimon_devices.db \"DELETE FROM devices WHERE username='USUARIO';\""
+echo ""
+echo -e "${YELLOW}Para ver logs:${NC}"
+echo "  tail -f /var/www/html/netsimon_device_log.txt"
+echo ""
